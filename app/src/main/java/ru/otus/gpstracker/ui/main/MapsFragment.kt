@@ -3,6 +3,8 @@ package ru.otus.gpstracker.ui.main
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.DialogInterface
+import android.content.Intent
+import android.location.Location
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -12,35 +14,39 @@ import android.view.ViewGroup
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
+import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.Observer
-import com.google.android.gms.location.*
 import com.google.android.gms.maps.*
+import com.google.android.gms.maps.model.JointType
 import com.google.android.gms.maps.model.LatLng
+import com.google.android.gms.maps.model.Polyline
+import com.google.android.gms.maps.model.PolylineOptions
+import ru.otus.gpstracker.LocationForegroundService
 import ru.otus.gpstracker.R
 import ru.otus.gpstracker.databinding.FragmentMapsBinding
+import ru.otus.gpstracker.utils.factory
 
 class MapsFragment : Fragment() {
 
     private var isCameraMovedManual: Boolean = false
     private lateinit var binding: FragmentMapsBinding
     private var locationChangedListener: LocationSource.OnLocationChangedListener? = null
-    private val locationRequest = LocationRequest()
-        .setInterval(1_000)
-        .setFastestInterval(1_000)
-        .setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY)
+    private var polyline: Polyline? = null
 
-    private val locationCallback: LocationCallback = object : LocationCallback() {
+    private var isFirstPosition = true
 
-        override fun onLocationResult(result: LocationResult?) {
-            super.onLocationResult(result)
-            if (result == null) return
-            val lastLocation = result.lastLocation
-            locationChangedListener?.onLocationChanged(lastLocation)
-            if (isCameraMovedManual) return
-            val position = LatLng(lastLocation.latitude, lastLocation.longitude)
-            map?.animateCamera(CameraUpdateFactory.newLatLngZoom(position, 18f))
+    fun onLocationResult(lastLocation: Location) {
+        locationChangedListener?.onLocationChanged(lastLocation)
+        if (isCameraMovedManual) return
+        val position = LatLng(lastLocation.latitude, lastLocation.longitude)
+        val cameraUpdate = CameraUpdateFactory.newLatLngZoom(position, 18f)
+        if (isFirstPosition) {
+            map?.moveCamera(cameraUpdate)
+            isFirstPosition = false
+        } else {
+            map?.animateCamera(cameraUpdate)
         }
     }
 
@@ -49,10 +55,9 @@ class MapsFragment : Fragment() {
         isCameraMovedManual = false
     }
 
-    private val viewModel: MainViewModel by viewModels()
+    private val viewModel: MainViewModel by viewModels { factory }
 
     private lateinit var resultLauncher: ActivityResultLauncher<String>
-    private lateinit var fusedLocationClient: FusedLocationProviderClient
 
     private var map: GoogleMap? = null
 
@@ -60,6 +65,11 @@ class MapsFragment : Fragment() {
     private val callback = OnMapReadyCallback { googleMap ->
         map = googleMap
 
+        val color = ContextCompat.getColor(requireContext(), R.color.teal_700)
+        val polylineOptions: PolylineOptions = PolylineOptions()
+            .jointType(JointType.ROUND)
+            .color(color)
+        polyline = googleMap.addPolyline(polylineOptions)
         googleMap.setLocationSource(object : LocationSource {
             override fun activate(listener: LocationSource.OnLocationChangedListener) {
                 locationChangedListener = listener
@@ -74,9 +84,6 @@ class MapsFragment : Fragment() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        fusedLocationClient =
-            LocationServices.getFusedLocationProviderClient(requireContext())
 
         resultLauncher =
             registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranded ->
@@ -113,6 +120,7 @@ class MapsFragment : Fragment() {
             handler.postDelayed(cameraMovedRunnable, 5_000)
             false
         }
+        binding.btnStop.setOnClickListener { viewModel.onStopClick() }
         initObservers()
     }
 
@@ -130,16 +138,23 @@ class MapsFragment : Fragment() {
                 .show()
         })
 
-        viewModel.startLocation.observe(viewLifecycleOwner, Observer {
-            map?.isMyLocationEnabled = true
-            fusedLocationClient.requestLocationUpdates(
-                locationRequest,
-                locationCallback,
-                Looper.getMainLooper()
-            )
+        viewModel.startLocation.observe(viewLifecycleOwner, Observer { start ->
+            val intent = Intent(requireContext(), LocationForegroundService::class.java)
+            if (start) {
+                map?.isMyLocationEnabled = true
+                ContextCompat.startForegroundService(requireContext(), intent)
+            } else {
+                requireContext().stopService(intent)
+            }
         })
         viewModel.showMyLocation.observe(viewLifecycleOwner, Observer {
             map?.isMyLocationEnabled = it
+        })
+        viewModel.points.observe(viewLifecycleOwner, Observer {
+            polyline?.points = it
+        })
+        viewModel.location.observe(viewLifecycleOwner, Observer {
+            onLocationResult(it)
         })
     }
 
